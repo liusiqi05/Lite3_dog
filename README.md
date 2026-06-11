@@ -89,6 +89,22 @@ python main_controller1.py
 └── hand_landmarker.task           # MediaPipe 手势模型
 ```
 
+### 手动下载大模型文件
+
+以下 2 个模型文件超过 GitHub 100MB 限制，需要手动下载并放入对应目录：
+
+| 文件 | 大小 | 下载地址 | 放置路径 |
+|------|------|---------|---------|
+| `1k3d68.onnx` | 143MB | [InsightFace GitHub](https://github.com/deepinsight/insightface/releases) | `models/buffalo_m/1k3d68.onnx` |
+| `w600k_r50.onnx` | 174MB | [InsightFace GitHub](https://github.com/deepinsight/insightface/releases) | `models/buffalo_m/w600k_r50.onnx` |
+
+或者运行以下命令自动下载：
+```bash
+# 安装 insightface 后会提示下载 buffalo_m 模型
+pip install insightface
+python -c "import insightface; insightface.model_zoo.get_model('buffalo_m')"
+```
+
 ## 🔧 配置参数
 关键配置在 `main_controller1.py` 顶部：
 
