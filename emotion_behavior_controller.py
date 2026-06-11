@@ -294,7 +294,7 @@ class EmotionBehaviorRunner:
         music = self.audio.play(2)
         self.commander.set_mode("in-place mode", Cmd.IN_PLACE_MODE)
         self.commander.set_speed("medium speed", Cmd.MEDIUM_SPEED)
-        self.commander.action("moonwalk", Cmd.MOONWALK, wait_s=1.2)
+        self.commander.action("moonwalk", Cmd.MOONWALK, wait_s=3.0)
         self.commander.return_zero()
         self.commander.action("twist body", Cmd.TWIST_BODY, wait_s=2.0)
         self.commander.return_zero()
