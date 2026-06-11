@@ -67,6 +67,10 @@ class IntegratedController:
         self.is_acting = False
         self.stop_requested = False
 
+        # ── 机器人发送锁 & 动作状态锁 ──
+        self.robot_send_lock = threading.RLock()
+        self.action_lock = threading.Lock()
+
         # 初始化子模块 (延迟导入，避免循环依赖)
         self.face_app = None  # InsightFace 实例
         self.emotion_net = None  # VGG19 情绪模型
@@ -75,6 +79,7 @@ class IntegratedController:
 
         # 机器人控制器
         self.robot = None
+        self._raw_send_simple = None  # 保存原始 send_simple，避免代理递归
 
         # 手势识别器
         self.gesture_recognizer = None
@@ -107,10 +112,110 @@ class IntegratedController:
         self.gest_last_trigger = 0.0
         self.GEST_NONCONT_COOLDOWN = 1.5
         self.gest_last_send = 0.0
-        self.GEST_SEND_INTERVAL = 0.05  # 50ms, 20Hz 提高指令下发频率
+        self.GEST_SEND_INTERVAL = 0.05  # 50ms, 20Hz
         self.gest_prev_center = None
         self.gest_swipe_cd = 0
         self.gest_mobile_mode = False
+
+        # ── 离散手势防重复触发（busy 时间） ──
+        self.gest_discrete_busy_until = 0.0
+        self._emergency_stop_cd = 0.0  # 急停冷却，防止 PALM 持续触发
+        self._palm_count = 0           # PALM 稳定计数，防止手势切换误触发
+        self.PALM_STABLE_NEED = 5      # 连续 5 帧 PALM 才触发急停
+        self.GEST_ACTION_WAIT = {
+            "FIST": 0.8,
+            "THUMBS_UP": 2.5,
+            "OK": 1.5,
+            "SWIPE_LEFT": 0.8,
+            "SWIPE_RIGHT": 0.8,
+            "SIX": 1.0,
+        }
+
+    # ==============================================
+    # 统一发送 & 动作状态管理
+    # ==============================================
+
+    def _safe_send_simple(self, code, p1=0, p2=0, *, force=False):
+        """统一机器人发送入口：加锁 + 急停检查 + 异常保护。
+        注意：使用 _raw_send_simple 避免 _SafeRobotProxy 代理时递归。"""
+        if self.robot is None:
+            return
+        if not force and self.stop_requested:
+            return  # 普通动作在急停状态下不发送
+        try:
+            with self.robot_send_lock:
+                if self._raw_send_simple:
+                    self._raw_send_simple(code, p1, p2)
+                else:
+                    self.robot.send_simple(code, p1, p2)
+        except Exception as e:
+            print(f"  ⚠️ 发送指令失败 0x{code:08X}: {e}")
+
+    class _SafeRobotProxy:
+        """安全代理：临时替换原始 robot 的 send_simple，让动作序列所有内部
+        调用（hold_motion/action/set_mode 等）都经过 _safe_send_simple。
+        动作结束后 restore() 恢复原始方法。"""
+        def __init__(self, controller, real_robot):
+            self._ctrl = controller
+            self._real = real_robot
+            self._orig_send_simple = real_robot.send_simple
+            # 替换：方法内部 self.send_simple(...) 都走代理
+            real_robot.send_simple = self._proxy_send_simple
+
+        def _proxy_send_simple(self, code, param1=0, param2=0, quiet=False):
+            self._ctrl._safe_send_simple(code, param1, param2, force=False)
+
+        def restore(self):
+            self._real.send_simple = self._orig_send_simple
+
+        def send_simple(self, code, param1=0, param2=0, quiet=False):
+            # 直接调用也走安全通道
+            self._ctrl._safe_send_simple(code, param1, param2, force=False)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    def _try_begin_action(self) -> bool:
+        """尝试开始动作（加锁防重复），成功返回 True"""
+        with self.action_lock:
+            if self.is_acting:
+                return False
+            self.is_acting = True
+            self.stop_requested = False
+            return True
+
+    def _finish_action(self):
+        """结束动作"""
+        with self.action_lock:
+            self.is_acting = False
+
+    def emergency_stop(self):
+        """统一急停：停止运动 + 重置状态。
+        使用 _raw_send_simple 绕过代理，确保急停命令一定发出。
+        内置 2 秒冷却，防止 PALM 持续触发重复急停。"""
+        now = time.time()
+        if now - self._emergency_stop_cd < 5.0:
+            return  # 冷却中（5秒），不重复急停
+        self._emergency_stop_cd = now
+
+        print("\n🛑 紧急停止")
+        self.stop_requested = True
+        self.is_acting = False
+        # 清空手势状态
+        self.gest_current = "NONE"
+        self.gest_raw = "NONE"
+        self.gest_stable_count = 0
+        self.gest_none_linger = 0
+        self.gest_discrete_busy_until = 0.0
+        # 直接用原始 send_simple 发送停止，绕过所有限制
+        try:
+            if self._raw_send_simple:
+                self._raw_send_simple(0x21010130, 0, 0)  # FORWARD_BACK 停止
+                self._raw_send_simple(0x21010135, 0, 0)  # TURN 停止
+            elif self.robot:
+                self.robot.stop_motion()
+        except Exception as e:
+            print(f"  ⚠️ 急停发送失败: {e}")
 
     # ==============================================
     # 初始化各模块
@@ -167,6 +272,7 @@ class IntegratedController:
         from emotion_behavior_controller import Lite3Commander, Cmd
 
         self.robot = Lite3Commander(ctrl_ip=ROBOT_IP, ctrl_port=ROBOT_PORT)
+        self._raw_send_simple = self.robot.send_simple  # 保存原始引用，防代理递归
         self.robot_cmd = Cmd
 
         # 让机器人站起来
@@ -295,6 +401,9 @@ class IntegratedController:
             print("  SKIP - depth sensor unavailable")
             return True
 
+        # 扫描前清理急停状态，确保后续可正常恢复
+        self.stop_requested = False
+
         strictest = max(EMOTION_SAFETY_THRESHOLDS.values())
 
         print("\n" + "=" * 50)
@@ -305,7 +414,7 @@ class IntegratedController:
         # 先切换到移动模式才能转向
         if self.robot:
             print("  Switching to mobile mode...")
-            self.robot.send_simple(0x21010D06, 0, 0)
+            self._safe_send_simple(0x21010D06, 0, 0)
             time.sleep(0.3)
 
         all_dists = []
@@ -326,14 +435,20 @@ class IntegratedController:
             direction = TURN_PARAM if degrees > 0 else -TURN_PARAM
             turns = int(round(abs(degrees) / DEG_PER_TURN))
             for _ in range(turns):
-                self.robot.send_simple(0x21010135, direction, 0)
+                self._safe_send_simple(0x21010135, direction, 0)
                 time.sleep(wait_each)
-            self.robot.send_simple(0x21010135, 0, 0)  # 停止
+            self._safe_send_simple(0x21010135, 0, 0)  # 停止
 
         # ================================================
         # 转一圈，每 45° 测一次距离（用校准后的转速）
         # ================================================
         for step in range(8):
+            # 急停中断检查
+            if self.stop_requested:
+                print("  ⚠️ Sweep interrupted by stop_requested")
+                self._safe_send_simple(0x21010135, 0, 0)  # 停止旋转
+                return False
+
             angle = step * STEP_DEG
 
             # --- 旋转到目标角度（第 0 步不转，直接测起始方向）---
@@ -490,7 +605,7 @@ class IntegratedController:
         """确保机器狗处于移动模式"""
         if not self.gest_mobile_mode and self.robot:
             print("  🚀 切换到移动模式")
-            self.robot.send_simple(0x21010D06, 0, 0)
+            self._safe_send_simple(0x21010D06, 0, 0)
             self.gest_mobile_mode = True
 
     def _gest_send(self, name, code, p1, p2):
@@ -498,14 +613,14 @@ class IntegratedController:
         from gesture_control import GESTURE_NAMES
         display = GESTURE_NAMES.get(name, name)
         print(f"✋ [{display}] → 0x{code:08X} p1={p1} p2={p2}")
-        self.robot.send_simple(code, p1, p2)
+        self._safe_send_simple(code, p1, p2)
 
     def _gest_send_stop(self, name):
-        """发送手势对应的停止指令"""
+        """发送手势对应的停止指令（force=True 不受急停限制）"""
         from gesture_control import STOP_MAP
         if name in STOP_MAP:
             code, p1, p2 = STOP_MAP[name]
-            self.robot.send_simple(code, p1, p2)
+            self._safe_send_simple(code, p1, p2, force=True)
 
     def _gest_detect_swipe(self, hand_center_x, frame_w):
         """滑动检测"""
@@ -531,10 +646,18 @@ class IntegratedController:
 
     def _gest_handle(self, raw_gesture):
         """
-        手势状态机：稳定化 → NONE延滞 → 冷却 → 执行/停止
-        与 gesture_control.py 的 _handle_gesture 逻辑一致
+        手势状态机：PALM 急停（最高优先）→ 稳定化 → NONE延滞 → busy/冷却 → 执行/停止
         """
         now = time.time()
+
+        # 0. PALM 急停 — 最高优先级，需稳定 N 帧防误触发
+        if raw_gesture == "PALM":
+            self._palm_count += 1
+            if self._palm_count >= self.PALM_STABLE_NEED and self.gest_current != "PALM":
+                self.emergency_stop()
+                self.gest_current = "PALM"
+            return
+        self._palm_count = 0  # 非 PALM 则重置
 
         # 1. 稳定化
         if raw_gesture == self.gest_raw:
@@ -542,9 +665,6 @@ class IntegratedController:
         else:
             self.gest_raw = raw_gesture
             self.gest_stable_count = 1
-        # 临时屏蔽五指张开（PALM）手势
-        if raw_gesture == "PALM":
-            raw_gesture = "NONE"
 
         if self.gest_stable_count < self.GEST_STABLE_THRESHOLD:
             return
@@ -561,10 +681,11 @@ class IntegratedController:
             if self.gest_none_linger < self.GEST_NONE_LINGER:
                 if prev_cont and now - self.gest_last_send >= self.GEST_SEND_INTERVAL:
                     c, p1, p2, _ = GESTURE_COMMAND_MAP[prev]
-                    self.robot.send_simple(c, p1, p2)
+                    self._safe_send_simple(c, p1, p2)
                     self.gest_last_send = now
                 return
             else:
+                # NONE 延滞到期 → 发送停止命令
                 if prev in STOP_MAP:
                     self._gest_send_stop(prev)
                 self.gest_current = "NONE"
@@ -572,21 +693,31 @@ class IntegratedController:
                 return
         self.gest_none_linger = 0
 
-        # 3. 手势不变 → 维持
+        # 3. 手势不变 → 维持（连续手势按周期发送）
         if target == self.gest_current:
             if is_cont and now - self.gest_last_send >= self.GEST_SEND_INTERVAL:
                 c, p1, p2, _ = GESTURE_COMMAND_MAP[target]
-                self.robot.send_simple(c, p1, p2)
+                self._safe_send_simple(c, p1, p2)
                 self.gest_last_send = now
             return
 
-        # 4. 手势变化 → 切换
+        # 4. 手势变化 → 先停止旧手势，再检查 busy/冷却
         if self.gest_current in STOP_MAP:
             self._gest_send_stop(self.gest_current)
+
+        # 5. 离散手势 busy 时间检查（防止重复触发）
+        if not is_cont and now < self.gest_discrete_busy_until:
+            return  # busy 中跳过
+
+        # 6. 非连续手势冷却检查
         if not is_cont:
             if now - self.gest_last_trigger < self.GEST_NONCONT_COOLDOWN:
                 return  # 冷却中跳过
+
+        # 7. 执行新手势（急停后第一个新手势自动清除 stop_requested）
         if target in GESTURE_COMMAND_MAP:
+            if self.stop_requested:
+                self.stop_requested = False  # 用户主动发新手势=恢复控制
             if target in MOVEMENT_GESTURES:
                 self._gest_ensure_mobile()
             c, p1, p2, _ = GESTURE_COMMAND_MAP[target]
@@ -595,6 +726,9 @@ class IntegratedController:
             self.gest_last_send = now
             if not is_cont:
                 self.gest_last_trigger = now
+                # 设置离散手势 busy 时间
+                wait = self.GEST_ACTION_WAIT.get(target, 1.5)
+                self.gest_discrete_busy_until = now + wait
         else:
             self.gest_current = target
 
@@ -633,7 +767,9 @@ class IntegratedController:
     # ==============================================
 
     def execute_action_for_emotion(self, emotion, person_name):
-        """根据情绪执行对应的机器人动作序列（含安全检测）"""
+        """根据情绪执行对应的机器人动作序列（含安全检测）
+        注意：is_acting/stop_requested 由 _try_begin_action/_finish_action 管理，
+        此方法不再自行设置"""
         # ── 安全检测 ──
         safe, distance, threshold, reason = self.check_safety_for_emotion(emotion)
 
@@ -665,17 +801,16 @@ class IntegratedController:
             print(f"  ⏸️ {emotion} 无对应动作")
             return False
 
+        proxy = None
         try:
             from emotion_behavior_controller import EmotionBehaviorRunner, Lite3Commander, LightController, AudioPlayer
             from pathlib import Path
 
             project_dir = Path(__file__).resolve().parent
-            lights = LightController(self.robot)
+            proxy = self._SafeRobotProxy(self, self.robot)
+            lights = LightController(proxy)
             audio = AudioPlayer(project_dir)
-            runner = EmotionBehaviorRunner(self.robot, lights, audio)
-
-            self.stop_requested = False
-            self.is_acting = True
+            runner = EmotionBehaviorRunner(proxy, lights, audio)
 
             print(f"\n🎬 开始执行动作序列: {emotion} (识别自: {person_name})")
             print("-" * 40)
@@ -694,13 +829,9 @@ class IntegratedController:
 
         except Exception as e:
             print(f"  ❌ 动作执行失败: {e}")
-
         finally:
-            # 动作完成后重新站立，避免 return_zero 导致趴下
-            if self.robot:
-                self.robot.stand_up(wait_s=1.5)
-            self.is_acting = False
-            self.stop_requested = False
+            if proxy is not None:
+                proxy.restore()  # 恢复原始 send_simple
 
         # ── 情绪识别完成 → 锁定情绪模块，切换到手势模式 ──
         print(f"\n🔒 情绪模块已锁定 | 切换到【手势控制模式】")
@@ -831,15 +962,35 @@ class IntegratedController:
                                     pending_emotion = dominant
                                     print(f"\n📊 情绪分析完成: {face_name} → [{dominant}]")
 
-                                    def do_action():
-                                        self.execute_action_for_emotion(dominant, face_name)
+                                    if not self._try_begin_action():
+                                        print("  ⏳ 当前动作未完成，忽略新的情绪动作")
+                                    else:
+                                        def do_action():
+                                            try:
+                                                self.execute_action_for_emotion(dominant, face_name)
+                                            finally:
+                                                self._finish_action()
 
-                                    threading.Thread(target=do_action, daemon=True).start()
+                                        threading.Thread(target=do_action, daemon=True).start()
                                 emotion_count = {}
                                 last_emotion_time = now
 
             # ════════════════════════════════════════════
-            # 阶段 2：手势控制模式
+            # PALM 急停检测（始终运行，不受 is_acting/模式限制）
+            # 需要连续稳定帧防误触发（手势切换时 MediaPipe 可能短暂误判 PALM）
+            # ════════════════════════════════════════════
+            if self.gesture_recognizer and self._frame_count % 3 == 0:
+                raw_gesture, _ = self.gesture_recognizer.get_latest_result()
+                if raw_gesture == "PALM":
+                    self._palm_count += 1
+                    if self._palm_count >= self.PALM_STABLE_NEED and self.gest_current != "PALM":
+                        self.emergency_stop()
+                        self.gest_current = "PALM"
+                else:
+                    self._palm_count = 0
+
+            # ════════════════════════════════════════════
+            # 阶段 2：手势控制模式（仅在非动作状态）
             # ════════════════════════════════════════════
             gest_display = "NONE"
             has_hands = False
@@ -939,11 +1090,7 @@ class IntegratedController:
             elif key == ord('d'):
                 self._delete_person()
             elif key == ord(' '):
-                print("\n紧急停止")
-                if self.robot:
-                    self.robot.stop_motion()
-                self.stop_requested = True
-                self.is_acting = False
+                self.emergency_stop()
 
         self.cleanup()
 
@@ -1003,15 +1150,28 @@ class IntegratedController:
         self.running = False
         self._capture_running = False
 
+        # 先尝试急停再关闭
         if self.robot:
-            self.robot.stop_motion()
-            self.robot.close()
+            try:
+                self.robot.stop_motion()
+            except Exception as e:
+                print(f"  ⚠️ 停止运动失败: {e}")
+            try:
+                self.robot.close()
+            except Exception as e:
+                print(f"  ⚠️ 关闭机器人连接失败: {e}")
 
         if self.cap:
-            self.cap.release()
+            try:
+                self.cap.release()
+            except Exception:
+                pass
 
         if self.gesture_recognizer:
-            self.gesture_recognizer.close()
+            try:
+                self.gesture_recognizer.close()
+            except Exception:
+                pass
 
         cv2.destroyAllWindows()
         print("✅ 系统已安全退出")
