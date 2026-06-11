@@ -1,0 +1,61 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pkl
+*.log
+*.h5
+
+# 环境
+venv/
+.env
+*.whl
+
+# IDE
+.idea/
+.history/
+
+# 模型缓存（自动下载）
+hand_landmarker.task
+
+# 人脸数据库（运行生成）
+face_database.pkl
+
+# 独立仓库（已单独克隆）
+Lite3_LLM/
+
+# 数据集/训练相关
+CK+48/
+data/
+demo/
+images/
+
+# 临时图片
+imgSave.png
+output.wav
+
+# 非核心脚本（训练/测试/演示）
+camera_demo.py
+CK.py
+controller.py
+dog_camera.py
+dog_camera(3).py
+dog_vision_insight.py
+emotion_behavior_controller(1).py
+fer.py
+k_fold_train.py
+main.py
+main_controller.py
+mainpro_CK+.py
+mainpro_FER.py
+
+# 超过 GitHub 100MB 限制的大模型文件
+models/buffalo_m/1k3d68.onnx
+models/buffalo_m/w600k_r50.onnx
+plot_CK+_confusion_matrix.py
+plot_fer2013_confusion_matrix.py
+preprocess_CK+.py
+preprocess_fer2013.py
+utils.py
+visualize.py
+test_*.py
