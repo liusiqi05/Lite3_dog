@@ -163,7 +163,9 @@ class IntegratedController:
             real_robot.send_simple = self._proxy_send_simple
 
         def _proxy_send_simple(self, code, param1=0, param2=0, quiet=False):
-            self._ctrl._safe_send_simple(code, param1, param2, force=False)
+            # 心跳 (0x21040001) 永远不受急停影响
+            force = (code == 0x21040001)
+            self._ctrl._safe_send_simple(code, param1, param2, force=force)
 
         def restore(self):
             self._real.send_simple = self._orig_send_simple
@@ -185,9 +187,10 @@ class IntegratedController:
             return True
 
     def _finish_action(self):
-        """结束动作"""
+        """结束动作：清除动作状态，并重置急停标记以允许后续指令"""
         with self.action_lock:
             self.is_acting = False
+            self.stop_requested = False  # ★ 清除急停标记，否则后续指令全被拦截
 
     def emergency_stop(self):
         """统一急停：停止运动 + 重置状态。
@@ -822,10 +825,19 @@ class IntegratedController:
             elif action_code == 3:
                 runner.excited()
             elif action_code == 4:
-                runner.alert()
+                runner.fear()
 
             print("-" * 40)
             print(f"✅ 动作序列完成")
+
+            # ── 动作结束后的状态清理 ──
+            # 1. 停止所有残留运动指令（如 return_zero 后的惯性）
+            proxy.stop_motion()
+            time.sleep(0.2)
+            # 2. return_zero 已将关节归零（中立站立），无需额外 STAND_LIE
+            #    切换到移动模式，为后续动作做准备
+            proxy.send_simple(0x21010D06, 0, 0)  # MOVE_MODE
+            time.sleep(0.3)
 
         except Exception as e:
             print(f"  ❌ 动作执行失败: {e}")
@@ -976,10 +988,10 @@ class IntegratedController:
                                 last_emotion_time = now
 
             # ════════════════════════════════════════════
-            # PALM 急停检测（始终运行，不受 is_acting/模式限制）
-            # 需要连续稳定帧防误触发（手势切换时 MediaPipe 可能短暂误判 PALM）
+            # PALM 急停检测（仅在非动作状态运行）
+            # 动作执行期间禁用，防止物理抖动/误触发阻塞动作序列
             # ════════════════════════════════════════════
-            if self.gesture_recognizer and self._frame_count % 3 == 0:
+            if self.gesture_recognizer and not self.is_acting and self._frame_count % 3 == 0:
                 raw_gesture, _ = self.gesture_recognizer.get_latest_result()
                 if raw_gesture == "PALM":
                     self._palm_count += 1
@@ -1032,14 +1044,6 @@ class IntegratedController:
                 status = "ACTING"
             cv2.putText(frame, status, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                         (0, 255, 0) if not self.is_acting else (0, 0, 255), 2)
-
-            # 情绪进度
-            if self.mode == "emotion" and pending_person and emotion_count and not self.is_acting:
-                remain = max(0, EMOTION_COLLECT_SECONDS - (time.time() - last_emotion_time))
-                prog = int((EMOTION_COLLECT_SECONDS - remain) / EMOTION_COLLECT_SECONDS * 20)
-                bar = "#" * prog + "." * (20 - prog)
-                cv2.putText(frame, f"ANALYZE {pending_person}: [{bar}]", (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                            (255, 255, 0), 1)
 
             # 手势显示（简化，不显示进度条避免闪烁）
             if self.mode == "gesture":
