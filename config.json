@@ -1,0 +1,37 @@
+{
+  "robot": {
+    "ip": "192.168.2.1",
+    "control_port": 43893,
+    "local_port": 43897,
+    "heartbeat_interval": 0.1
+  },
+  "camera": {
+    "rtsp_url": "rtsp://192.168.1.120:8554/test",
+    "width": 640,
+    "height": 480,
+    "buffer_size": 3,
+    "target_fps": 30
+  },
+  "depth_sensor": {
+    "url": "http://127.0.0.1:8000",
+    "timeout": 0.5,
+    "thresholds": {
+      "Sad": 1.0,
+      "Happy": 0.6,
+      "Surprise": 0.8,
+      "Fear": 0.3,
+      "Angry": 0.3,
+      "Disgust": 0.3,
+      "Neutral": 0.0
+    }
+  },
+  "recognition": {
+    "emotion_collect_seconds": 5,
+    "frame_skip": 3,
+    "gesture_stable_threshold": 12,
+    "gesture_none_linger": 35,
+    "gesture_noncont_cooldown": 1.5,
+    "gesture_send_interval": 0.05,
+    "palm_stable_need": 5
+  }
+}

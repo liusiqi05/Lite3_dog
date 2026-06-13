@@ -1,0 +1,19 @@
+[project]
+name = "lite3-dog"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "insightface>=1.0.1",
+    "mediapipe>=0.10.35",
+    "numpy>=2.4.6",
+    "opencv-python>=4.13.0.92",
+    "pillow>=12.2.0",
+    "pyside6>=6.11.1",
+    "torch>=2.12.0",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
