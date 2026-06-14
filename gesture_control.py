@@ -16,6 +16,7 @@ import threading
 from PIL import Image, ImageDraw, ImageFont
 
 from udp_client import RobotUDPClient
+from depth_guard_client import get_front_distance
 
 # MediaPipe 新版 API
 from mediapipe.tasks.python import vision
@@ -357,6 +358,13 @@ class GestureController:
         self._fps_timer = time.time()
         self._fps_counter = 0
 
+        # ── 深度相机安全检测 ──
+        self._depth_enabled = True
+        self.DEPTH_STOP_THRESHOLD = 0.35   # 前方距离小于此值(米)则急停
+        self._depth_last_check = 0.0
+        self._depth_check_interval = 0.15  # 每 150ms 检测一次
+        self._depth_last_distance = None   # 最近一次有效距离
+
     def _heartbeat_loop(self):
         """后台心跳线程: 每 100ms 发送一次心跳，保持与机器狗的连接"""
         while self._running:
@@ -583,7 +591,7 @@ class GestureController:
         h, w, _ = frame.shape
 
         overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (w, 150), (0, 0, 0), -1)
+        cv2.rectangle(overlay, (0, 0), (w, 175), (0, 0, 0), -1)
         frame = cv2.addWeighted(overlay, 0.5, frame, 0.5, 0)
 
         # 解析显示文本 (可能含稳定化进度: "FIST|##..")
@@ -614,6 +622,17 @@ class GestureController:
             speed_label = "MEDIUM" if self._speed_is_medium else "LOW"
             cv2.putText(frame, f"CMD: 0x{actual_code:08X} p1={cmd[1]} p2={cmd[2]}  SPD:{speed_label}",
                         (20, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+
+        # 深度相机信息
+        if self._depth_enabled:
+            d = self._depth_last_distance
+            if d is not None:
+                depth_color = (0, 255, 0) if d > self.DEPTH_STOP_THRESHOLD else (0, 0, 255)
+                cv2.putText(frame, f"DEPTH: {d:.2f}m  STOP<{self.DEPTH_STOP_THRESHOLD:.2f}m",
+                            (20, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.5, depth_color, 2)
+            else:
+                cv2.putText(frame, "DEPTH: N/A",
+                            (20, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 2)
 
         # 调试信息
         now = time.time()
@@ -727,6 +746,19 @@ class GestureController:
                         raw_gesture = swipe
                 else:
                     self.prev_hand_center = None
+
+                # ── 深度相机安全检测 ──
+                now = time.time()
+                if self._depth_enabled and now - self._depth_last_check >= self._depth_check_interval:
+                    self._depth_last_check = now
+                    try:
+                        dist = get_front_distance()
+                        self._depth_last_distance = dist
+                        if dist is not None and dist < self.DEPTH_STOP_THRESHOLD:
+                            print(f"\n⚠️ 前方障碍 {dist:.2f}m < {self.DEPTH_STOP_THRESHOLD}m，自动急停!")
+                            self._emergency_stop_key()
+                    except Exception:
+                        self._depth_last_distance = None
 
                 # 传入原始手势, 稳定化在内部处理
                 self._handle_gesture(raw_gesture)
