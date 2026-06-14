@@ -287,9 +287,9 @@ class EmotionBehaviorRunner:
         print("emotion 1 sad: done")
         print("")
 
-    def happy(self):
+    def excited(self):
         print("")
-        print("emotion 2 happy: start")
+        print("emotion 2 excited: start")
         self.lights.set_color("red")
         music = self.audio.play(2)
         self.commander.set_mode("in-place mode", Cmd.IN_PLACE_MODE)
@@ -298,17 +298,17 @@ class EmotionBehaviorRunner:
         # moonwalk 是持续步态，需要先切回正常步态再归零
         self.commander.set_speed("medium speed", Cmd.MEDIUM_SPEED)
         self.commander.return_zero()
-        self.commander.action("twist body", Cmd.TWIST_BODY, wait_s=2.0)
+        self.commander.action("twist body", Cmd.TWIST_BODY, wait_s=10.0)
         self.commander.return_zero()
         self.commander.action("wave", Cmd.WAVE, wait_s=3.0)
         self.commander.return_zero()
         self.audio.wait(music)
-        print("emotion 2 happy: done")
+        print("emotion 2 excited: done")
         print("")
 
-    def excited(self):
+    def happy(self):
         print("")
-        print("emotion 3 excited: start")
+        print("emotion 3 happy: start")
         stop_light = threading.Event()
         light_thread = threading.Thread(
             target=self.lights.alternate,
@@ -335,7 +335,7 @@ class EmotionBehaviorRunner:
         finally:
             stop_light.set()
             light_thread.join(timeout=1.0)
-        print("emotion 3 excited: done")
+        print("emotion 3 happy: done")
         print("")
 
     def fear(self):  # 原 alert 改为 fear
