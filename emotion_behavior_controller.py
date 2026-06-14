@@ -140,9 +140,9 @@ class AudioPlayer:
     def music_path(self, index):
         filename = "%s.mp3" % index
         candidates = [
-            self.project_dir.parent / "Music" / filename,
             self.project_dir.parent / "music" / filename,
-            self.project_dir / "Music" / filename,
+            self.project_dir.parent / "music" / filename,
+            self.project_dir / "music" / filename,
             self.project_dir / "music" / filename,
         ]
         for path in candidates:
@@ -291,7 +291,7 @@ class EmotionBehaviorRunner:
         print("")
         print("emotion 2 excited: start")
         self.lights.set_color("red")
-        music = self.audio.play(2)
+        music = self.audio.play(3)
         self.commander.set_mode("in-place mode", Cmd.IN_PLACE_MODE)
         self.commander.set_speed("medium speed", Cmd.MEDIUM_SPEED)
         self.commander.action("moonwalk", Cmd.MOONWALK, wait_s=3.0)
@@ -317,7 +317,7 @@ class EmotionBehaviorRunner:
             daemon=True,
         )
         light_thread.start()
-        music = self.audio.play(3)
+        music = self.audio.play(2)
         try:
             self.commander.set_mode("in-place mode", Cmd.IN_PLACE_MODE)
             self.commander.set_speed("high speed", Cmd.HIGH_SPEED)
