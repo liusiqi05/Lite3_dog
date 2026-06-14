@@ -9,8 +9,19 @@ Usage:
 """
 
 import argparse
+import os
 import signal
 import sys
+
+# ═══════ Windows Conda DLL 路径修复 ═══════
+# Conda Library\bin 中的旧版 VC++ DLL 会与 pip 安装的 PyTorch/PySide6
+# 自带的 DLL 冲突。os.add_dll_directory() 在导入前将正确目录加入搜索路径。
+_torch_lib = os.path.join(sys.prefix, "Lib", "site-packages", "torch", "lib")
+if os.path.isdir(_torch_lib):
+    os.add_dll_directory(_torch_lib)
+_pyside6_dir = os.path.join(sys.prefix, "Lib", "site-packages", "PySide6")
+if os.path.isdir(_pyside6_dir):
+    os.add_dll_directory(_pyside6_dir)
 
 import main_controller1 as _mctrl
 
