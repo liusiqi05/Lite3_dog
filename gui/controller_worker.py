@@ -298,37 +298,37 @@ class GuiIntegratedController(_mctrl.IntegratedController):
         else:
             mode_color_bgr = (200, 255, 0)  # Green
 
-        mode_text = "[情绪识别模式]" if self.mode == "emotion" else "[手势控制模式]"
+        mode_text = "[EMOTION]" if self.mode == "emotion" else "[GESTURE]"
         cv2.putText(frame, mode_text, (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, mode_color_bgr, 2)
 
         # Status line
-        status = "空闲"
+        status = "IDLE"
         if self.depth_client:
             dist = self.depth_client.get_front_distance()
             if dist is not None:
-                status = f"前方 {dist:.1f}m"
+                status = f"FRONT {dist:.1f}m"
         if self.is_acting:
-            status = "动作执行中"
+            status = "ACTING"
 
         status_color = (0, 255, 0) if not self.is_acting else (0, 0, 255)  # BGR
         cv2.putText(frame, status, (10, 55),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, status_color, 2)
 
-        # Gesture display
+        # Gesture display (use English names for OpenCV compatibility)
         if self.mode == "gesture":
             if gest_display != "NONE" and "|" not in gest_display:
-                from gesture_control import GESTURE_NAMES
-                gn = GESTURE_NAMES.get(gest_display, gest_display)
+                from gesture_control import GESTURE_NAMES_EN
+                gn = GESTURE_NAMES_EN.get(gest_display, gest_display)
                 cv2.putText(frame, gn, (10, 85),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 255, 0), 2)
             elif self.gest_current != "NONE":
-                from gesture_control import GESTURE_NAMES
-                gn = GESTURE_NAMES.get(self.gest_current, self.gest_current)
+                from gesture_control import GESTURE_NAMES_EN
+                gn = GESTURE_NAMES_EN.get(self.gest_current, self.gest_current)
                 cv2.putText(frame, gn, (10, 85),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 255, 0), 2)
             else:
-                cv2.putText(frame, "等待手势...", (10, 85),
+                cv2.putText(frame, "NO GESTURE", (10, 85),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
 
         # Registered persons (top right)
@@ -366,7 +366,7 @@ class GuiIntegratedController(_mctrl.IntegratedController):
 
         status = {
             "mode": self.mode,
-            "robot_connected": self.robot is not None and self.robot._running,
+            "robot_connected": self.robot is not None and self.robot.running,
             "depth_distance": dist,
             "emotion": self._iter_pending_emotion,
             "emotion_owner": self._iter_pending_person,

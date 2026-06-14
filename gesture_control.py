@@ -64,6 +64,22 @@ GESTURE_NAMES = {
     "NONE": "无手势",
 }
 
+# ─── 纯英文手势名（OpenCV 帧上显示用） ───
+GESTURE_NAMES_EN = {
+    "FIST": "FIST",
+    "ONE": "FWD",
+    "TWO": "BACK",
+    "FOUR": "RIGHT",
+    "THUMBS_UP": "UP/DOWN",
+    "SIX": "MID SPD",
+    "NONE": "NONE",
+    "PALM": "STOP",
+    "OK": "ZERO",
+    "THREE": "LEFT",
+    "SWIPE_LEFT": "SLIDE L",
+    "SWIPE_RIGHT": "SLIDE R",
+}
+
 # ─── 中文字体渲染 ─────────────────────────────────────
 _FONT_CACHE = {}
 
