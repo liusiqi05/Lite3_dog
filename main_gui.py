@@ -12,10 +12,11 @@ import argparse
 import signal
 import sys
 
+import main_controller1 as _mctrl
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-import main_controller1 as _mctrl
 from gui.controller_worker import ControllerWorker
 from gui.gui_bridge import GuiBridge
 from gui.main_window import MainWindow
