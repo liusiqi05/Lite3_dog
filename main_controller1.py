@@ -100,8 +100,9 @@ class IntegratedController:
         self.last_report_time = 0
 
         # ── 双阶段模式状态 ──
-        self.mode = "emotion"       # "emotion" | "gesture"
-        self.emotion_locked = False # 情绪识别是否已锁定
+        self.mode = "emotion"           # "emotion" | "gesture"
+        self.emotion_locked = False     # 情绪识别是否已锁定
+        self.emotion_submode = "auto"    # "auto" | "manual"  (emotion 模式下子模式)
 
         # ── 手势控制状态（从 GestureController 迁移） ──
         self.gest_current = "NONE"
@@ -867,15 +868,17 @@ class IntegratedController:
         print("=" * 60)
         print("\n操作说明:")
         print("  【阶段1 - 情绪识别】:")
-        print("  • 系统自动检测人脸 -> 识别情绪 -> 执行动作")
+        print("  • [AUTO] 自动检测人脸 -> 识别情绪 -> 执行动作")
+        print("  • [MANUAL] 按 a 切换 → 键盘 1=Happy 2=Sad 3=Surprise 4=Fear")
         print("  • 动作完成后自动切换到【手势控制模式】")
         print("  【阶段2 - 手势控制】:")
         print("  • 所有手势直接控制机器狗运动")
         print("  • 握拳=待命 | 五指张开=急停 | 竖拇指=起立/趴下")
         print("  • 食指=前进 | 剪刀手=后退 | 三指=左转 | 四指=右转")
         print("  按键:")
-        print("  • 按【m】键: 手动切换模式")
-        print("  • 按【s】键: 录入人脸 (仅情绪模式)")
+        print("  • 按【a】键: Emotion 下切换 AUTO/MANUAL")
+        print("  • 按【m】键: 手动切换主模式")
+        print("  • 按【s】键: 录入人脸")
         print("  • 按【d】键: 删除人员")
         print("  • 按【空格】键: 紧急停止")
         print("  • 按【q】键: 退出系统")
@@ -922,8 +925,10 @@ class IntegratedController:
 
             # ════════════════════════════════════════════
             # 阶段 1：情绪识别模式
+            #   auto:   自动检测人脸+情绪
+            #   manual: 仅显示画面，等待键盘 1-4 触发
             # ════════════════════════════════════════════
-            if self.mode == "emotion" and not self.is_acting:
+            if self.mode == "emotion" and not self.is_acting and self.emotion_submode == "auto":
                 face_name = None
                 emotion = None
                 bbox = None
@@ -1030,8 +1035,11 @@ class IntegratedController:
 
             # 模式标题
             mode_color = (0, 200, 255) if self.mode == "emotion" else (0, 255, 200)
-            mode_text = "[EMOTION MODE]" if self.mode == "emotion" else "[GESTURE MODE]"
-            cv2.putText(frame, mode_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, mode_color, 2)
+            if self.mode == "emotion":
+                mode_text = f"[EMOTION] {self.emotion_submode.upper()}"
+            else:
+                mode_text = "[GESTURE MODE]"
+            cv2.putText(frame, mode_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, mode_color, 2)
 
             # 状态行
             status = "IDLE"
@@ -1076,7 +1084,7 @@ class IntegratedController:
                 print("\n用户退出")
                 break
             elif key == ord('m'):
-                # 手动切换模式
+                # 手动切换主模式
                 if self.mode == "emotion":
                     self.mode = "gesture"
                     self.emotion_locked = True
@@ -1087,6 +1095,30 @@ class IntegratedController:
                     pending_person = None
                     emotion_count = {}
                     print("\n手动切换到情绪识别模式")
+            elif key == ord('a') and self.mode == "emotion" and not self.is_acting:
+                # 切换 auto / manual 子模式
+                if self.emotion_submode == "auto":
+                    self.emotion_submode = "manual"
+                    print("🎮 Emotion 子模式: MANUAL (按 1-4 触发动作)")
+                else:
+                    self.emotion_submode = "auto"
+                    print("🤖 Emotion 子模式: AUTO (自动检测人脸)")
+                pending_person = None
+                emotion_count = {}
+            elif key >= ord('1') and key <= ord('4') and self.mode == "emotion" and self.emotion_submode == "manual" and not self.is_acting:
+                # 手动模式：键盘 1-4 直接触发情绪动作
+                key_emotion_map = {'1': 'Happy', '2': 'Sad', '3': 'Surprise', '4': 'Fear'}
+                emotion_name = key_emotion_map[chr(key)]
+                print(f"\n🎮 手动触发: [{emotion_name}]")
+                if not self._try_begin_action():
+                    print("  ⏳ 当前动作未完成，忽略")
+                else:
+                    def do_action():
+                        try:
+                            self.execute_action_for_emotion(emotion_name, "Manual")
+                        finally:
+                            self._finish_action()
+                    threading.Thread(target=do_action, daemon=True).start()
             elif key == ord('s') and self.mode == "emotion" and len(self._last_faces) > 0:
                 self._register_face(frame, self._last_faces)
                 self._last_faces = []

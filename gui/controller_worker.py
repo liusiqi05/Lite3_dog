@@ -77,6 +77,9 @@ class GuiIntegratedController(_mctrl.IntegratedController):
         # ── Call parent __init__ ──
         super().__init__()
 
+        # ── Emotion submode (auto/manual) ──
+        self.emotion_submode = "auto"  # "auto" | "manual"
+
         # ── Replace capture thread signal with nothing ──
         self._capture_running = False  # VideoBridge handles this
 
@@ -130,6 +133,41 @@ class GuiIntegratedController(_mctrl.IntegratedController):
 
         print("  ✅ 摄像头就绪 (帧由 VideoBridge 提供)")
 
+    # ── Emotion submode handlers ───────────────────────────
+
+    def _on_toggle_emotion_submode(self):
+        """Toggle between auto and manual emotion submode."""
+        if self.emotion_submode == "auto":
+            self.emotion_submode = "manual"
+            self._gui_bridge.log_message.emit("🎮 情绪子模式: MANUAL", "INFO")
+        else:
+            self.emotion_submode = "auto"
+            self._gui_bridge.log_message.emit("🤖 情绪子模式: AUTO", "INFO")
+        # Sync submode state to GUI control panel
+        self._gui_bridge.status_update.emit({"emotion_submode": self.emotion_submode})
+
+    def _on_manual_emotion_trigger(self, emotion_name: str):
+        """Handle manual emotion trigger from GUI buttons."""
+        if self.mode != "emotion" or self.emotion_submode != "manual":
+            return
+        if self.is_acting:
+            self._gui_bridge.log_message.emit("⏳ 当前动作未完成", "WARNING")
+            return
+        if not self._try_begin_action():
+            self._gui_bridge.log_message.emit("⏳ 动作冲突，忽略", "WARNING")
+            return
+        print(f"\n🎮 手动触发: [{emotion_name}]")
+        self._gui_bridge.log_message.emit(f"🎮 手动触发: {emotion_name}", "INFO")
+
+        def do_action():
+            try:
+                self.execute_action_for_emotion(emotion_name, "Manual")
+            finally:
+                self._finish_action()
+
+        import threading
+        threading.Thread(target=do_action, daemon=True).start()
+
     # ── Public: single-iteration entry point ──
 
     def run_gui_iteration(self, frame: np.ndarray) -> np.ndarray | None:
@@ -156,9 +194,9 @@ class GuiIntegratedController(_mctrl.IntegratedController):
         )
 
         # ════════════════════════════════════════════
-        #  Phase 1: Emotion recognition
+        #  Phase 1: Emotion recognition (auto submode only)
         # ════════════════════════════════════════════
-        if self.mode == "emotion" and not self.is_acting:
+        if self.mode == "emotion" and not self.is_acting and self.emotion_submode == "auto":
             face_name = None
             emotion = None
             bbox = None
@@ -298,7 +336,10 @@ class GuiIntegratedController(_mctrl.IntegratedController):
         else:
             mode_color_bgr = (200, 255, 0)  # Green
 
-        mode_text = "[EMOTION]" if self.mode == "emotion" else "[GESTURE]"
+        if self.mode == "emotion":
+            mode_text = f"[EMOTION] {self.emotion_submode.upper()}"
+        else:
+            mode_text = "[GESTURE]"
         cv2.putText(frame, mode_text, (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, mode_color_bgr, 2)
 

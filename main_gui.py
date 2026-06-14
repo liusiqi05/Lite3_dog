@@ -79,9 +79,10 @@ class Application:
         #  but we also wire frame_ready directly here)
 
         # ── Control Panel → Controller actions ──
-        # Mode switch / emergency stop: wired via bridge signals in MainWindow
         b.request_emergency_stop.connect(self._on_emergency_stop)
         b.request_mode_switch.connect(self._on_mode_switch)
+        b.request_emotion_submode_toggle.connect(self._on_emotion_submode_toggle)
+        b.request_manual_emotion.connect(self._on_manual_emotion)
 
         # ── Controller lifecycle ──
         c.finished.connect(self._on_controller_finished)
@@ -115,6 +116,43 @@ class Application:
             ctrl.emotion_locked = False
             self.bridge.log_message.emit("🔓 手动切换至情绪识别模式", "INFO")
             self.bridge.mode_changed.emit("emotion")
+
+    def _on_emotion_submode_toggle(self):
+        """Toggle emotion submode: auto ↔ manual."""
+        ctrl = self.controller.get_controller()
+        if ctrl is None or ctrl.mode != "emotion":
+            return
+        if ctrl.emotion_submode == "auto":
+            ctrl.emotion_submode = "manual"
+            self.bridge.log_message.emit("🎮 情绪子模式: MANUAL", "INFO")
+            self.bridge.status_update.emit({"emotion_submode": "manual"})
+        else:
+            ctrl.emotion_submode = "auto"
+            self.bridge.log_message.emit("🤖 情绪子模式: AUTO", "INFO")
+            self.bridge.status_update.emit({"emotion_submode": "auto"})
+
+    def _on_manual_emotion(self, emotion_name: str):
+        """Trigger a manual emotion action from GUI button."""
+        ctrl = self.controller.get_controller()
+        if ctrl is None:
+            return
+        if ctrl.mode != "emotion" or ctrl.emotion_submode != "manual":
+            self.bridge.log_message.emit("⚠️ 请先切换到 MANUAL 模式", "WARNING")
+            return
+        if ctrl.is_acting:
+            self.bridge.log_message.emit("⏳ 当前动作未完成", "WARNING")
+            return
+        if not ctrl._try_begin_action():
+            self.bridge.log_message.emit("⏳ 动作冲突，忽略", "WARNING")
+            return
+        self.bridge.log_message.emit(f"🎮 手动触发: {emotion_name}", "INFO")
+        import threading
+        def do_action():
+            try:
+                ctrl.execute_action_for_emotion(emotion_name, "Manual")
+            finally:
+                ctrl._finish_action()
+        threading.Thread(target=do_action, daemon=True).start()
 
     def _on_controller_finished(self):
         """Called when ControllerWorker thread exits."""

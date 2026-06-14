@@ -46,6 +46,12 @@ class GuiBridge(QObject):
     request_emergency_stop = Signal()
     """Trigger immediate emergency stop."""
 
+    request_emotion_submode_toggle = Signal()
+    """Toggle emotion submode: auto ↔ manual."""
+
+    request_manual_emotion = Signal(str)
+    """Trigger a manual emotion action: 'Happy', 'Sad', 'Surprise', 'Fear'."""
+
     request_face_register = Signal(str, object)
     """Register a face: (name, embedding). Embedding is numpy array."""
 
