@@ -1,0 +1,7 @@
+# Lite3 Dog Control System - GUI Dependencies
+# Install with: uv add -r requirements-gui.txt
+# or: pip install -r requirements-gui.txt
+
+pyside6>=6.5
+numpy>=1.24
+opencv-python>=4.8
