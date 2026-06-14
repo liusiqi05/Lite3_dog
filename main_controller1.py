@@ -17,7 +17,7 @@ import cv2
 import torch
 from depth_guard_client import DepthGuardClient, get_front_distance, is_front_safe
 from gesture_control import GESTURE_COMMAND_MAP, STOP_MAP, GESTURE_NAMES
-MOVEMENT_GESTURES = {"ONE", "TWO", "THREE", "FOUR", "SWIPE_LEFT", "SWIPE_RIGHT"}
+MOVEMENT_GESTURES = {"ONE", "TWO", "FOUR"}
 
 # ==================================================
 # 配置参数
@@ -123,11 +123,8 @@ class IntegratedController:
         self._palm_count = 0           # PALM 稳定计数，防止手势切换误触发
         self.PALM_STABLE_NEED = 5      # 连续 5 帧 PALM 才触发急停
         self.GEST_ACTION_WAIT = {
-            "FIST": 0.8,
-            "THUMBS_UP": 2.5,
-            "OK": 1.5,
-            "SWIPE_LEFT": 0.8,
-            "SWIPE_RIGHT": 0.8,
+            "FIST": 2.0,
+            "THUMBS_UP": 1.5,
             "SIX": 1.0,
         }
 

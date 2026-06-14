@@ -13,6 +13,7 @@ import sys
 import os
 import urllib.request
 import threading
+from PIL import Image, ImageDraw, ImageFont
 
 from udp_client import RobotUDPClient
 
@@ -37,16 +38,11 @@ FINGER_DEFS = [
 # 手势 → 机器人指令映射
 # 格式: (code, param1, param2, is_continuous)
 GESTURE_COMMAND_MAP = {
-    "FIST":        (0x21040001, 0, 0, False),       # 握拳 → 心跳/待命
-    "PALM":        (0x21010C0E, 0, 0, False),       # 五指张开 → 软急停
+    "FIST":        (0x21010202, 0, 0, False),       # 握拳 → 起立/趴下
     "ONE":         (0x21010130, 32767, 0, True),    # 食指 → 前进
     "TWO":         (0x21010130, -32767, 0, True),   # 剪刀手 → 后退
-    "THREE":       (0x21010135, -32767, 0, True),   # 三指 → 左转
     "FOUR":        (0x21010135, 32767, 0, True),    # 四指 → 右转
-    "THUMBS_UP":   (0x21010202, 0, 0, False),       # 竖拇指 → 起立/趴下
-    "OK":          (0x21010C05, 0, 0, False),       # OK → 回零
-    "SWIPE_LEFT":  (0x21010131, -32767, 0, True),   # 左滑 → 左平移
-    "SWIPE_RIGHT": (0x21010131, 32767, 0, True),    # 右滑 → 右平移
+    "THUMBS_UP":   (0x21010507, 0, 0, False),       # 竖拇指 → 挥手/握手
     "SIX":         (0x21010307, 0, 0, False),       # 六(拇指+小指) → 中速
 }
 
@@ -54,27 +50,54 @@ GESTURE_COMMAND_MAP = {
 STOP_MAP = {
     "ONE":         (0x21010130, 0, 0),
     "TWO":         (0x21010130, 0, 0),
-    "THREE":       (0x21010135, 0, 0),
     "FOUR":        (0x21010135, 0, 0),
-    "SWIPE_LEFT":  (0x21010131, 0, 0),
-    "SWIPE_RIGHT": (0x21010131, 0, 0),
 }
 
 # 手势中文名
 GESTURE_NAMES = {
     "FIST": "握拳 👊",
-    "PALM": "五指张开 ✋",
     "ONE": "食指 1️⃣",
     "TWO": "剪刀手 ✌️",
-    "THREE": "三指 🤟",
     "FOUR": "四指 🖖",
     "THUMBS_UP": "竖拇指 👍",
-    "OK": "OK 👌",
-    "SWIPE_LEFT": "左滑 ⬅️",
-    "SWIPE_RIGHT": "右滑 ➡️",
     "SIX": "六(拇+小) 🤙",
     "NONE": "无手势",
 }
+
+# ─── 中文字体渲染 ─────────────────────────────────────
+_FONT_CACHE = {}
+
+def _get_font(size=24):
+    if size not in _FONT_CACHE:
+        candidates = [
+            ("/System/Library/Fonts/PingFang.ttc", 0),
+            ("/System/Library/Fonts/STHeiti Light.ttc", 0),
+            ("/System/Library/Fonts/Supplemental/Songti.ttc", 0),
+            ("/usr/share/fonts/truetype/wqy/wqy-microhei.ttf", None),
+            ("C:/Windows/Fonts/msyh.ttc", 0),
+        ]
+        for p, idx in candidates:
+            if os.path.exists(p):
+                kwargs = {"index": idx} if idx is not None else {}
+                _FONT_CACHE[size] = ImageFont.truetype(p, size, **kwargs)
+                break
+        else:
+            _FONT_CACHE[size] = None
+    return _FONT_CACHE[size]
+
+def _draw_chinese(frame, text, pos, font_size=28, color=(0, 255, 0)):
+    """用 PIL 在 OpenCV 画面上绘制中文"""
+    font = _get_font(font_size)
+    if font is None:
+        ascii_only = text.encode("ascii", errors="replace").decode("ascii")
+        cv2.putText(frame, ascii_only, pos, cv2.FONT_HERSHEY_SIMPLEX, font_size / 20, color, 2)
+        return frame
+    pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
+    draw.text((pos[0] + 1, pos[1] + 1), text, font=font, fill=(0, 0, 0))
+    draw.text(pos, text, font=font, fill=(color[2], color[1], color[0]))
+    frame[:, :] = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    return frame
 
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
 
@@ -103,6 +126,9 @@ class GestureRecognizer:
         self._latest_result = None
         self._latest_ts = -1
         self._latest_gesture = "NONE"
+
+        # 单调递增时间戳计数器（MediaPipe 要求严格递增）
+        self._ts_counter = 0
 
         # 回调函数：MediaPipe 异步检测完成后调用
         def _result_callback(result, output_image, timestamp_ms):
@@ -140,25 +166,17 @@ class GestureRecognizer:
         return self._distance(wrist, mid_mcp)
 
     def _is_finger_straight(self, landmarks, tip_idx, pip_idx, mcp_idx):
-        """判断手指是否伸直
-
-        拇指: 指尖到食指MCP距离 > 阈值 (相对手大小归一化)
-        其余: 指尖相对于PIP/MCP的位置, 用手的尺度归一化
-        """
+        """判断手指是否伸直"""
         tip = landmarks[tip_idx]
         pip = landmarks[pip_idx]
         mcp = landmarks[mcp_idx]
         scale = self._get_hand_scale(landmarks)
         if scale < 0.01:
-            scale = 0.1  # 防止除零
-
-        if tip_idx == 4:  # 拇指: 用指尖到食指MCP的归一化距离
+            scale = 0.1
+        if tip_idx == 4:
             index_mcp = landmarks[5]
             return self._distance(tip, index_mcp) / scale > self.THUMB_DIST_THRESHOLD
         else:
-            # 用指尖在指根上方的相对高度判断
-            # (mcp.y - tip.y) > 0 表示指尖在指根上方
-            # 用 hand_scale 归一化消除距离远近影响
             return (mcp.y - tip.y) / scale > 0.08
 
     def _is_pinky_spread(self, landmarks):
@@ -169,12 +187,7 @@ class GestureRecognizer:
         return self._distance(pinky_tip, ring_tip) / scale > self.PINKY_SPREAD_THRESHOLD
 
     def classify(self, landmarks):
-        """将 21 个 hand landmarks 分类为手势名
-
-        优先级:
-          五指张开(5根全直) → 握拳(0根直) → 
-          竖拇指 → SIX → OK → 数量手势(1-4) → NONE
-        """
+        """将 21 个 hand landmarks 分类为手势名"""
         if landmarks is None:
             return "NONE"
 
@@ -182,36 +195,24 @@ class GestureRecognizer:
         for tip, pip, mcp in FINGER_DEFS:
             fingers.append(self._is_finger_straight(landmarks, tip, pip, mcp))
 
-        # [拇指, 食指, 中指, 无名指, 小指]
         straight_count = sum(fingers)
         tip_thumb = landmarks[4]
         tip_index = landmarks[8]
         scale = self._get_hand_scale(landmarks)
         pinch_dist = self._distance(tip_thumb, tip_index) / scale
-        thumb_up = fingers[0] and not any(fingers[1:4])  # 仅拇指直
+        thumb_up = fingers[0] and not any(fingers[1:4])
 
-        # ── 握拳 (全弯) ──
         if straight_count == 0:
             return "FIST"
-
-        # ── 五指张开 (5根全直) ──
         if straight_count == 5:
             return "PALM"
-
-        # ── 竖拇指: 仅拇指伸直, 且拇指不处于捏合状态 ──
         if thumb_up and not fingers[4] and pinch_dist > 0.08:
             return "THUMBS_UP"
-
-        # ── SIX (拇+小): 拇指和小指伸直, 其余弯曲, 小指张开 ──
         if (fingers[0] and fingers[4] and not any(fingers[1:4])):
             if self._is_pinky_spread(landmarks) and pinch_dist > 0.08:
                 return "SIX"
-
-        # ── OK: 拇指食指捏合, 中无名弯曲 ──
         if pinch_dist < self.OK_PINCH_THRESHOLD and not fingers[2] and not fingers[3]:
             return "OK"
-
-        # ── 数量手势 (明确只用伸直的食指数量) ──
         if straight_count == 1 and fingers[1] and not fingers[0]:
             return "ONE"
         if straight_count == 2 and fingers[1] and fingers[2] and not fingers[0]:
@@ -220,21 +221,17 @@ class GestureRecognizer:
             return "THREE"
         if straight_count == 4 and all(fingers[1:5]) and not fingers[0]:
             return "FOUR"
-
         return "NONE"
 
     def detect(self, rgb_frame, timestamp_ms=None):
         """异步提交一帧进行手势检测（非阻塞）
 
-        提交后立即返回，检测结果通过回调更新。
-        需调用 get_latest_result() 获取最新结果。
+        使用单调递增计数器确保时间戳严格递增。
         """
-        if timestamp_ms is None:
-            timestamp_ms = int(time.time() * 1000)
-
-        # 时间戳必须严格递增，否则 MediaPipe 会丢弃
+        self._ts_counter += 1
+        ts = timestamp_ms if timestamp_ms is not None else self._ts_counter
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-        self.detector.detect_async(mp_image, timestamp_ms)
+        self.detector.detect_async(mp_image, ts)
 
     def get_latest_result(self):
         """获取最新异步检测结果
@@ -309,9 +306,19 @@ class GestureController:
         self.current_gesture = "NONE"      # 当前已确认的手势
         self.raw_gesture = "NONE"          # 每帧检测的原始手势
         self.stable_count = 0              # 连续相同手势计数
-        self.STABLE_THRESHOLD = 4          # 连续4帧相同才确认 (约0.35s)
+        self.STABLE_THRESHOLD = 8          # 连续8帧相同才确认 (≈0.6s @15fps)
+        self.gesture_first_seen = 0.0      # 当前手势首次出现的时间戳
+        self.MIN_HOLD_TIME = 0.35          # 最小保持时间(秒)，防止一闪就触发
+
         self.none_linger = 0               # NONE持续帧数
         self.NONE_LINGER_THRESHOLD = 35    # NONE持续35帧(约3s)才视为手真的离开
+
+        # ── 触发后真空期 ──
+        self.trigger_blank_until = 0.0     # 在此时间前忽略所有手势变化
+        self.POST_TRIGGER_BLANK = 0.6      # 触发后真空期(秒)
+
+        # ── SIX 速度切换状态 ──
+        self._speed_is_medium = False      # 当前是否中速
 
         # ── 非连续命令冷却 ──
         self.last_trigger_time = 0
@@ -406,7 +413,7 @@ class GestureController:
 
     # ─── 命令发送 ────────────────────────────────────────
 
-    MOVEMENT_GESTURES = {"ONE", "TWO", "THREE", "FOUR", "SWIPE_LEFT", "SWIPE_RIGHT"}
+    MOVEMENT_GESTURES = {"ONE", "TWO", "FOUR"}
 
     def _ensure_mobile_mode(self):
         """确保机器狗处于移动模式 (原地模式下会忽略移动指令)"""
@@ -414,6 +421,14 @@ class GestureController:
             print("  🚀 切换到移动模式 (0x21010D06)")
             self.udp._send_simple(0x21010D06, 0, 0)
             self._mobile_mode_sent = True
+
+    def _get_six_command(self):
+        """SIX 切换中速/低速"""
+        self._speed_is_medium = not self._speed_is_medium
+        if self._speed_is_medium:
+            return 0x21010307  # MEDIUM_SPEED
+        else:
+            return 0x21010300  # LOW_SPEED
 
     def _send(self, gest, code, p1, p2):
         name = GESTURE_NAMES.get(gest, gest)
@@ -426,58 +441,88 @@ class GestureController:
             self.udp.send_command(code, p1, p2)
             print(f"  ⏹ 停止 {GESTURE_NAMES.get(gest, gest)}")
 
+    def _emergency_stop_key(self):
+        """键盘 X 键急停：停止所有运动 + 重置手势状态"""
+        print("\n🛑 [X] 键盘急停!")
+        # 停止所有运动
+        self.udp.send_command(0x21010130, 0, 0)  # FORWARD_BACK 停止
+        self.udp.send_command(0x21010135, 0, 0)  # TURN 停止
+        self.udp.send_command(0x21010131, 0, 0)  # LEFT_RIGHT 停止
+        # 重置手势状态
+        self.current_gesture = "NONE"
+        self.raw_gesture = "NONE"
+        self.stable_count = 0
+        self.none_linger = 0
+        self.trigger_blank_until = time.time() + 1.0
+
     def _handle_gesture(self, gesture):
-        """手势状态机: 稳定化 → NONE延滞 → 冷却判断 → 执行/停止"""
+        """手势状态机: 稳定化 → 最小保持 → 真空期 → NONE延滞 → 执行/停止"""
         now = time.time()
 
         # ════════════════════════════════════════════
-        # 1. 原始手势更新 & 稳定化
+        # 1. 原始手势更新 & 稳定化 (帧计数)
         # ════════════════════════════════════════════
         if gesture == self.raw_gesture:
             self.stable_count += 1
         else:
             self.raw_gesture = gesture
             self.stable_count = 1
+            self.gesture_first_seen = now  # 记录新手势首次出现时间
 
-        # 还没稳定: 不触发任何动作
+        # 还没稳定（帧数不够）: 不触发任何动作
         if self.stable_count < self.STABLE_THRESHOLD:
             return
 
         # 稳定后的目标手势
         target = gesture
 
+        # ════════════════════════════════════════════
+        # 2. 最小保持时间检查（防止闪一下就触发）
+        # ════════════════════════════════════════════
+        hold_duration = now - self.gesture_first_seen
+        if hold_duration < self.MIN_HOLD_TIME:
+            return  # 保持时间不够，继续等待
+
         is_continuous = GESTURE_COMMAND_MAP.get(target, (0, 0, 0, False))[3]
 
         # ════════════════════════════════════════════
-        # 2. NONE 处理 — 延滞机制
+        # 3. 触发后真空期检查（防止连发）
+        # ════════════════════════════════════════════
+        if now < self.trigger_blank_until:
+            # 真空期内：不切换新指令，但连续指令继续维持发送
+            if target == self.current_gesture and is_continuous:
+                if now - self.last_send_time >= self.send_interval:
+                    code, p1, p2, _ = GESTURE_COMMAND_MAP[target]
+                    self.udp.send_command(code, p1, p2)
+                    self.last_send_time = now
+            return
+
+        # ════════════════════════════════════════════
+        # 4. NONE 处理 — 延滞机制
         # ════════════════════════════════════════════
         if target == "NONE":
             if self.current_gesture == "NONE":
-                return  # 本来就空闲, 不管
-            # 有活跃命令: 增加 NONE 计数, 达到阈值才停止
+                return
             prev_gesture = self.current_gesture
             prev_continuous = GESTURE_COMMAND_MAP.get(prev_gesture, (0, 0, 0, False))[3]
             self.none_linger += 1
             if self.none_linger < self.NONE_LINGER_THRESHOLD:
-                # 手短暂消失: 维持当前命令, 连续命令继续周期性发送
                 if prev_continuous and now - self.last_send_time >= self.send_interval:
                     code, p1, p2, _ = GESTURE_COMMAND_MAP[prev_gesture]
                     self.udp.send_command(code, p1, p2)
                     self.last_send_time = now
                 return
             else:
-                # NONE 持续足够久 → 真的停止了
                 if prev_gesture in STOP_MAP:
                     self._send_stop(prev_gesture)
                 self.current_gesture = "NONE"
                 self.none_linger = 0
                 return
 
-        # 检测到手了, 重置 NONE 计数器
         self.none_linger = 0
 
         # ════════════════════════════════════════════
-        # 3. 手势保持不变 → 维持发送
+        # 5. 手势保持不变 → 维持发送
         # ════════════════════════════════════════════
         if target == self.current_gesture:
             if is_continuous and now - self.last_send_time >= self.send_interval:
@@ -487,18 +532,15 @@ class GestureController:
             return
 
         # ════════════════════════════════════════════
-        # 4. 手势变化 → 切换命令
+        # 6. 手势变化 → 切换命令
         # ════════════════════════════════════════════
-        # 先停止旧的连续命令 (只对旧的连续命令发停止)
         if self.current_gesture in STOP_MAP:
             self._send_stop(self.current_gesture)
 
-        # 非连续命令: 检查冷却, 防止高频触发
-        # 注意: 不更新 current_gesture, 防止"乒乓效应" (手势AB跳变时反复触发)
         if not is_continuous:
             if now - self.last_trigger_time < self.NONCONT_COOLDOWN:
                 print(f"  ⏳ 冷却中, 跳过 {GESTURE_NAMES.get(target, target)}")
-                return  # 不更新 current_gesture!
+                return
 
         # 执行新命令
         if target in GESTURE_COMMAND_MAP:
@@ -506,9 +548,14 @@ class GestureController:
             if target in self.MOVEMENT_GESTURES:
                 self._ensure_mobile_mode()
             code, p1, p2, _ = GESTURE_COMMAND_MAP[target]
+            # SIX 特殊处理：切换中速/低速
+            if target == "SIX":
+                code = self._get_six_command()
             self._send(target, code, p1, p2)
             self.current_gesture = target
             self.last_send_time = now
+            # 触发后设置真空期，防止连发
+            self.trigger_blank_until = now + self.POST_TRIGGER_BLANK
             if not is_continuous:
                 self.last_trigger_time = now
         else:
@@ -535,30 +582,48 @@ class GestureController:
             main_text = f"{gesture_name}"
             color = (0, 255, 0) if display_text != "NONE" else (128, 128, 128)
 
-        cv2.putText(frame, main_text, (20, 45),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 3)
+        # 中文手势名用 PIL 渲染
+        if display_text != "NONE":
+            _draw_chinese(frame, main_text, (15, 15), font_size=36, color=color)
+        else:
+            cv2.putText(frame, main_text, (20, 45),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 3)
 
         # 指令信息
         cmd = GESTURE_COMMAND_MAP.get(self.current_gesture)
         if cmd:
-            cv2.putText(frame, f"CMD: 0x{cmd[0]:08X} p1={cmd[1]} p2={cmd[2]}",
-                        (20, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            actual_code = cmd[0]
+            if self.current_gesture == "SIX":
+                actual_code = 0x21010307 if self._speed_is_medium else 0x21010300
+            speed_label = "MEDIUM" if self._speed_is_medium else "LOW"
+            cv2.putText(frame, f"CMD: 0x{actual_code:08X} p1={cmd[1]} p2={cmd[2]}  SPD:{speed_label}",
+                        (20, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
 
         # 调试信息
-        stab_info = f"STB: {self.stable_count}/{self.STABLE_THRESHOLD}"
-        hand_text = f"HAND: {'Y' if has_hands else 'N'} {stab_info} FPS: {self.fps:.0f}"
-        cv2.putText(frame, hand_text, (w - 260, 45),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 2)
+        now = time.time()
+        hold_remaining = max(0, self.MIN_HOLD_TIME - (now - self.gesture_first_seen)) if self.raw_gesture != "NONE" else 0
+        blank_remaining = max(0, self.trigger_blank_until - now)
+        stab_info = f"STB:{self.stable_count}/{self.STABLE_THRESHOLD}"
+        hand_text = f"HAND:{'Y' if has_hands else 'N'} {stab_info} FPS:{self.fps:.0f}"
+        cv2.putText(frame, hand_text, (w - 280, 35),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 2)
+        if hold_remaining > 0:
+            cv2.putText(frame, f"HOLD:{hold_remaining:.2f}s", (w - 280, 55),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 200, 0), 2)
+        if blank_remaining > 0:
+            cv2.putText(frame, f"BLANK:{blank_remaining:.2f}s", (w - 280, 75),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 100, 100), 2)
 
         # 冷却倒计时
         if self.current_gesture != "NONE":
-            remaining = max(0, self.NONCONT_COOLDOWN - (time.time() - self.last_trigger_time))
+            remaining = max(0, self.NONCONT_COOLDOWN - (now - self.last_trigger_time))
             if remaining > 0:
-                cv2.putText(frame, f"COOLDOWN: {remaining:.1f}s", (w - 260, 70),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 180, 0), 2)
+                cv2.putText(frame, f"COOLDOWN: {remaining:.1f}s", (w - 280, 95),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 180, 0), 2)
 
-        cv2.putText(frame, "[Q]uit [E]skip",
-                    (20, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+        cv2.putText(frame, "[Q]uit [E]skip [X]stop",
+                    (20, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 150, 150), 1)
+        return frame
 
     # ─── 主循环 ────────────────────────────────────────
 
@@ -571,76 +636,114 @@ class GestureController:
             return
 
         print("\n✅ 启动成功！控制说明:")
-        print("  [Q] 退出  [E] 切换跳帧模式")
+        print("  [Q] 退出  [E] 切换跳帧  [X] 急停")
         print("  将手放在摄像头前即可识别手势\n")
 
+        # RTSP 预热：持续读取直到拿到有效帧
+        print("  🔄 等待 RTSP 流就绪...")
+        for i in range(100):  # 最多等 5 秒
+            ret, test_frame = self.cap.read()
+            if ret and test_frame is not None and test_frame.size > 0 and test_frame.shape[0] > 0 and test_frame.shape[1] > 0:
+                print(f"  ✅ RTSP 流就绪 ({test_frame.shape[1]}x{test_frame.shape[0]})")
+                break
+            time.sleep(0.05)
+        else:
+            print("  ⚠️ RTSP 流未能获取有效帧，尝试 USB 摄像头...")
+            self.cap.release()
+            self.cap = None
+            for idx in range(3):
+                cap = cv2.VideoCapture(idx, cv2.CAP_AVFOUNDATION)
+                if cap.isOpened():
+                    ret, tf = cap.read()
+                    if ret and tf is not None and tf.size > 0:
+                        self.cap = cap
+                        print(f"  ✅ 回退到 USB 摄像头 (index={idx})")
+                        break
+                cap.release()
+            if self.cap is None:
+                print("❌ USB 摄像头也无法打开，退出")
+                return
+
         while self.cap and self.cap.isOpened():
-            ret, frame = self.cap.read()
-            if not ret:
-                print("⚠️ 丢帧, 等待重连...")
-                time.sleep(0.5)
-                continue
+            try:
+                ret, frame = self.cap.read()
+                if not ret or frame is None or frame.size == 0:
+                    print("⚠️ 丢帧...")
+                    time.sleep(0.05)
+                    continue
+                if frame.shape[0] == 0 or frame.shape[1] == 0:
+                    time.sleep(0.05)
+                    continue
 
-            frame = cv2.flip(frame, 1)
-            h, w, _ = frame.shape
+                frame = cv2.flip(frame, 1)
+                h, w, _ = frame.shape
 
-            # FPS
-            self._fps_counter += 1
-            elapsed = time.time() - self._fps_timer
-            if elapsed >= 1.0:
-                self.fps = self._fps_counter / elapsed
-                self._fps_counter = 0
-                self._fps_timer = time.time()
+                # FPS
+                self._fps_counter += 1
+                elapsed = time.time() - self._fps_timer
+                if elapsed >= 1.0:
+                    self.fps = self._fps_counter / elapsed
+                    self._fps_counter = 0
+                    self._fps_timer = time.time()
 
-            # 手势检测（异步提交，不阻塞）
-            raw_gesture = "NONE"
-            has_hands = False
-            display_gesture = self.current_gesture
-
-            if self.frame_count % self.process_every_n == 0:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                ts = int(time.time() * 1000)
-                self.recognizer.detect(rgb, timestamp_ms=ts)
-
-            # 读取最新异步结果
-            raw_gesture, result = self.recognizer.get_latest_result()
-
-            if result and result.hand_landmarks:
-                has_hands = True
-                self.recognizer.draw_landmarks(frame, result)
-
-                # 滑动检测
-                hand_landmarks = result.hand_landmarks[0]
-                hand_center = sum(lm.x for lm in hand_landmarks) / 21
-                swipe = self._detect_swipe(hand_center, w)
-                if swipe:
-                    raw_gesture = swipe
-            else:
-                self.prev_hand_center = None
-
-            # 传入原始手势, 稳定化在内部处理
-            self._handle_gesture(raw_gesture)
-
-            # 显示: 如果正在稳定中, 显示原始手势+进度
-            if self.stable_count < self.STABLE_THRESHOLD and raw_gesture != "NONE":
-                progress = "#" * self.stable_count + "." * (self.STABLE_THRESHOLD - self.stable_count)
-                display_gesture = f"{raw_gesture}|{progress}"
-            else:
+                # 手势检测（异步提交，不阻塞）
+                raw_gesture = "NONE"
+                has_hands = False
                 display_gesture = self.current_gesture
 
-            # 绘制画面
-            frame = self._draw_info(frame, display_gesture, has_hands)
-            cv2.imshow("Lite3 手势控制", frame)
+                if self.frame_count % self.process_every_n == 0:
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    ts = int(time.time() * 1000)
+                    self.recognizer.detect(rgb, timestamp_ms=ts)
 
-            # 按键
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
-            elif key == ord('e'):
-                self.process_every_n = {1: 2, 2: 3, 3: 1}[self.process_every_n]
-                print(f"  跳帧模式: 每 {self.process_every_n} 帧处理一次")
+                # 读取最新异步结果
+                raw_gesture, result = self.recognizer.get_latest_result()
 
-            self.frame_count += 1
+                if result and result.hand_landmarks:
+                    has_hands = True
+                    self.recognizer.draw_landmarks(frame, result)
+
+                    # 滑动检测
+                    hand_landmarks = result.hand_landmarks[0]
+                    hand_center = sum(lm.x for lm in hand_landmarks) / 21
+                    swipe = self._detect_swipe(hand_center, w)
+                    if swipe:
+                        raw_gesture = swipe
+                else:
+                    self.prev_hand_center = None
+
+                # 传入原始手势, 稳定化在内部处理
+                self._handle_gesture(raw_gesture)
+
+                # 显示: 如果正在稳定中, 显示原始手势+进度
+                if self.stable_count < self.STABLE_THRESHOLD and raw_gesture != "NONE":
+                    progress = "#" * self.stable_count + "." * (self.STABLE_THRESHOLD - self.stable_count)
+                    display_gesture = f"{raw_gesture}|{progress}"
+                else:
+                    display_gesture = self.current_gesture
+
+                # 绘制画面
+                frame = self._draw_info(frame, display_gesture, has_hands)
+                if frame is not None and frame.size > 0:
+                    cv2.imshow("Lite3 手势控制", frame)
+                else:
+                    continue
+
+                # 按键
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+                elif key == ord('e'):
+                    self.process_every_n = {1: 2, 2: 3, 3: 1}[self.process_every_n]
+                    print(f"  跳帧模式: 每 {self.process_every_n} 帧处理一次")
+                elif key in (ord('x'), ord('X')):
+                    self._emergency_stop_key()
+
+                self.frame_count += 1
+            except Exception as e:
+                print(f"  ⚠️ 帧处理异常: {e}")
+                time.sleep(0.1)
+                continue
 
         self.cleanup()
 
