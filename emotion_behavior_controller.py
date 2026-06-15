@@ -341,6 +341,7 @@ class EmotionBehaviorRunner:
     def fear(self):  # 原 alert 改为 fear
         print("")
         print("emotion 4 fear: start")
+        music = self.audio.play(4)
         self.commander.set_mode("in-place mode", Cmd.IN_PLACE_MODE)
         self.commander.set_speed("normal/crawl gait", Cmd.CRAWL_NORMAL)
         self.commander.action("twist jump", Cmd.TWIST_JUMP, wait_s=2.2)
@@ -350,7 +351,7 @@ class EmotionBehaviorRunner:
         self.commander.action("grip", Cmd.GRIP, wait_s=1.5)
         self.commander.return_zero()
         self.lights.blink("blue", times=6, interval_s=0.35)
-        self.audio.play(4, wait=True)
+        self.audio.wait(music)
         print("emotion 4 fear: done")
         print("")
 
